@@ -64,7 +64,7 @@ function saveRecentRoom(roomId, title, language) {
     const filtered = recents.filter(r => r.roomId !== roomId);
     filtered.unshift({ roomId, title: title || "Untitled", language: language || "javascript", visitedAt: Date.now() });
     localStorage.setItem("ep_recent_rooms", JSON.stringify(filtered.slice(0, 10)));
-  } catch {}
+  } catch { }
 }
 
 // ─────────────────────────────────────────────
@@ -175,8 +175,9 @@ const globalStyles = `
   .ide-file-row.unsaved::after{content:'●';position:absolute;right:8px;font-size:8px;color:var(--text3)}
   .ide-file-badge{width:16px;height:16px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:'DM Mono',monospace;font-size:7px;font-weight:700;flex-shrink:0;letter-spacing:-.5px}
   .ide-file-name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ide-file-actions{display:none;gap:2px;flex-shrink:0}
+  ide-file-actions{display:none;gap:2px;flex-shrink:0;margin-left:auto}
   .ide-file-row:hover .ide-file-actions{display:flex}
+  .ide-folder-row:hover .ide-file-actions{display:flex}
   .ide-file-action-btn{width:16px;height:16px;display:flex;align-items:center;justify-content:center;border-radius:3px;cursor:pointer;background:transparent;border:none;color:var(--text3);font-size:11px;transition:all .1s}
   .ide-file-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text1)}
 
@@ -349,6 +350,49 @@ const globalStyles = `
 
   .remote-cursor{border-left:2px solid #ff4d4f;height:1.2em;margin-left:-1px}
   .remote-cursor-label{background:#ff4d4f;color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;margin-left:4px}
+
+  /* Upload styles */
+  .ide-upload-group {
+    display: flex;
+    gap: 4px;
+  }
+  .ide-file-upload-progress {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: var(--bg2);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 12px 20px;
+    z-index: 1000;
+    font-size: 12px;
+    min-width: 200px;
+  }
+  .ide-file-upload-progress .progress-bar {
+    height: 2px;
+    background: var(--accent);
+    margin-top: 8px;
+    transition: width 0.3s;
+  }
+  .drag-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(99, 102, 241, 0.15);
+    backdrop-filter: blur(8px);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--accent);
+    pointer-events: none;
+  }
+  .drag-overlay-content {
+    background: var(--bg2);
+    padding: 32px;
+    border-radius: 16px;
+    text-align: center;
+    border: 1px solid var(--accent);
+  }
 `;
 
 // ─────────────────────────────────────────────
@@ -387,6 +431,8 @@ function EditorPage() {
   const ctxMenuRef = useRef(null);
   const consoleRef = useRef(null);
   const resizingRef = useRef(false);
+  const fileInputRef = useRef(null);
+
 
   // ── State ──
   const [toast, setToast] = useState(null);
@@ -397,10 +443,12 @@ function EditorPage() {
   const [usernameError, setUsernameError] = useState("");
   const [isJoining, setIsJoining] = useState(false);
   const [users, setUsers] = useState([]);
+  const [roomOwner, setRoomOwner] = useState(null);
+  const [isPrivate, setIsPrivate] = useState(false);
 
   // Files
   const [files, setFiles] = useState([
-    { id: "f1", name: "index.js", content: DEFAULT_CONTENT.javascript, unsaved: false },
+    { id: "f1", name: "index.js", type: "file", parentId: null, content: DEFAULT_CONTENT.javascript, unsaved: false },
   ]);
   const [activeFileId, setActiveFileId] = useState("f1");
   const [openTabs, setOpenTabs] = useState(["f1"]);
@@ -408,7 +456,17 @@ function EditorPage() {
   const [renameValue, setRenameValue] = useState("");
   const [creatingFile, setCreatingFile] = useState(false);
   const [newFileName, setNewFileName] = useState("");
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [creatingFileInFolder, setCreatingFileInFolder] = useState(null); // folderId
+  const [newFileInFolderName, setNewFileInFolderName] = useState("");
+  const [collapsedFolders, setCollapsedFolders] = useState({});
   const [ctxMenu, setCtxMenu] = useState(null); // {x, y, fileId}
+
+  // Upload states
+  const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
 
   // Activity bar + panels
   const [activityTab, setActivityTab] = useState("files"); // files | search | users
@@ -479,24 +537,78 @@ function EditorPage() {
     }
   }
 
-  function createNewFile(name) {
+  function createNewFile(name, parentId = null) {
     if (!name || !name.trim()) return;
     const trimmed = name.trim();
-    // auto-add extension if none
     const hasExt = trimmed.includes(".");
     const finalName = hasExt ? trimmed : trimmed + ".js";
-    if (files.some(f => f.name === finalName)) {
+    if (files.some(f => f.name === finalName && f.parentId === parentId)) {
       showToast("File already exists");
       return;
     }
     const id = genId();
     const content = getDefaultContent(finalName);
-    const newFile = { id, name: finalName, content, unsaved: false };
+    const newFile = { id, name: finalName, type: "file", parentId, content, unsaved: false };
     setFiles(prev => [...prev, newFile]);
     openFile(id);
-    // Broadcast
     socketRef.current?.emit("file-created", { roomId, file: newFile, username });
     showToast(`Created ${finalName}`);
+  }
+
+  function createNewFolder(name, parentId = null) {
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    if (files.some(f => f.name === trimmed && f.type === "folder" && f.parentId === parentId)) {
+      showToast("Folder already exists");
+      return;
+    }
+    const id = genId();
+    const newFolder = { id, name: trimmed, type: "folder", parentId, content: "", unsaved: false };
+    setFiles(prev => [...prev, newFolder]);
+    socketRef.current?.emit("file-created", { roomId, file: newFolder, username });
+    showToast(`Created folder: ${trimmed}`);
+  }
+
+  function createNewFileInFolder(name, parentId) {
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    const hasExt = trimmed.includes(".");
+    const finalName = hasExt ? trimmed : trimmed + ".js";
+    if (files.some(f => f.name === finalName && f.parentId === parentId)) {
+      showToast("File already exists in this folder");
+      return;
+    }
+    const id = genId();
+    const content = getDefaultContent(finalName);
+    const newFile = { id, name: finalName, type: "file", parentId, content, unsaved: false };
+    setFiles(prev => [...prev, newFile]);
+    openFile(id);
+    socketRef.current?.emit("file-created", { roomId, file: newFile, username });
+    showToast(`Created ${finalName}`);
+  }
+
+  function toggleFolder(folderId) {
+    setCollapsedFolders(prev => ({ ...prev, [folderId]: !prev[folderId] }));
+  }
+
+  function deleteFolder(folderId) {
+    // Recursively collect all descendant IDs
+    function collectDescendants(parentId) {
+      const children = files.filter(f => f.parentId === parentId);
+      let ids = [parentId];
+      children.forEach(child => {
+        if (child.type === "folder") ids = ids.concat(collectDescendants(child.id));
+        else ids.push(child.id);
+      });
+      return ids;
+    }
+    const toDelete = collectDescendants(folderId);
+    toDelete.forEach(id => {
+      socketRef.current?.emit("file-deleted", { roomId, fileId: id, username });
+      closeTab(id);
+    });
+    setFiles(prev => prev.filter(f => !toDelete.includes(f.id)));
+    showToast("Folder deleted");
   }
 
   function deleteFile(fileId) {
@@ -515,6 +627,165 @@ function EditorPage() {
 
   function updateFileContent(fileId, content) {
     setFiles(prev => prev.map(f => f.id === fileId ? { ...f, content, unsaved: true } : f));
+  }
+
+  // ── Download file ──
+  function downloadFile(file) {
+    const blob = new Blob([file.content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`Downloaded ${file.name}`);
+  }
+
+  // ── File upload functions ──
+  function readFileContent(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.onerror = (e) => reject(e);
+
+      const ext = getExtension(file.name);
+      const textExtensions = ['js', 'jsx', 'ts', 'tsx', 'py', 'c', 'cpp', 'cc', 'h', 'hpp', 'java', 'go', 'rs', 'rb', 'php', 'kt', 'sh', 'bash', 'html', 'css', 'json', 'md', 'yaml', 'yml', 'xml', 'sql', 'txt', 'csv', 'toml', 'ini', 'env', 'gitignore', 'lock'];
+
+      // Extensionless files that are always text
+      const textFilenames = ['makefile', 'dockerfile', 'vagrantfile', 'gemfile', 'rakefile', 'procfile', 'license', 'readme', 'changelog', 'authors', 'contributors', '.gitignore', '.env', '.editorconfig'];
+
+      const isTextByName = textFilenames.includes(file.name.toLowerCase());
+      const isTextByExt = textExtensions.includes(ext);
+      // If the "extension" equals the full name, the file has no extension
+      const hasNoExt = ext === file.name.toLowerCase();
+
+      if (isTextByName || isTextByExt || hasNoExt) {
+        reader.readAsText(file);
+      } else {
+        if (file.size > 1024 * 1024) {
+          reject(new Error('Binary files larger than 1MB are not supported'));
+        } else {
+          reader.readAsDataURL(file);
+          showToast(`Note: ${file.name} is a binary file. It will be read as base64.`);
+        }
+      }
+    });
+  }
+
+  async function processUploadedFiles(filesArray) {
+    if (!filesArray.length) return;
+    setUploadingFiles(true);
+    setUploadProgress({ current: 0, total: filesArray.length });
+
+    const currentFiles = [...files];
+    // folderPathToId: maps a slash-joined path like "src/utils" -> folderId
+    const folderPathToId = {};
+
+    // Ensure a chain of folder nodes exists for a given path array, return leaf folderId
+    function ensureFolderPath(parts) {
+      let parentId = null;
+      let builtPath = "";
+      for (const part of parts) {
+        builtPath = builtPath ? `${builtPath}/${part}` : part;
+        if (!folderPathToId[builtPath]) {
+          // Check if this folder already exists in currentFiles
+          const existing = currentFiles.find(
+            f => f.type === "folder" && f.name === part && f.parentId === parentId
+          );
+          if (existing) {
+            folderPathToId[builtPath] = existing.id;
+          } else {
+            const folderId = genId();
+            folderPathToId[builtPath] = folderId;
+            const folderNode = { id: folderId, name: part, type: "folder", parentId, content: "", unsaved: false };
+            currentFiles.push(folderNode);
+            setFiles(prev => [...prev, folderNode]);
+            socketRef.current?.emit("file-created", { roomId, file: folderNode, username });
+          }
+        }
+        parentId = folderPathToId[builtPath];
+      }
+      return parentId;
+    }
+
+    for (let i = 0; i < filesArray.length; i++) {
+      const file = filesArray[i];
+      try {
+        const content = await readFileContent(file);
+
+        // Determine parentId from webkitRelativePath if available
+        let parentId = null;
+        const relativePath = file.webkitRelativePath || "";
+        if (relativePath && relativePath.includes("/")) {
+          const parts = relativePath.split("/");
+          // parts = ["folderName", ..., "filename"] — strip last element (the file)
+          const folderParts = parts.slice(0, -1);
+          parentId = ensureFolderPath(folderParts);
+        }
+
+        const existingFile = currentFiles.find(f => f.name === file.name && f.parentId === parentId && f.type === "file");
+        if (existingFile) {
+          const shouldOverwrite = window.confirm(`${file.name} already exists. Overwrite?`);
+          if (shouldOverwrite) {
+            updateFileContent(existingFile.id, content);
+            socketRef.current?.emit("code-change", { roomId, fileId: existingFile.id, code: content, username });
+            showToast(`Overwrote ${file.name}`);
+          }
+        } else {
+          const id = genId();
+          const newFile = { id, name: file.name, type: "file", parentId, content, unsaved: false };
+          currentFiles.push(newFile);
+          setFiles(prev => [...prev, newFile]);
+          socketRef.current?.emit("file-created", { roomId, file: newFile, username });
+          showToast(`Uploaded ${file.name}`);
+        }
+      } catch (error) {
+        console.error(`Failed to upload ${file.name}:`, error);
+        showToast(`Failed to upload ${file.name}`);
+      }
+      setUploadProgress({ current: i + 1, total: filesArray.length });
+    }
+
+    setUploadingFiles(false);
+    setUploadProgress({ current: 0, total: 0 });
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function handleFileUpload(e) {
+    const filesArray = Array.from(e.target.files);
+    processUploadedFiles(filesArray);
+  }
+
+  function handleFolderUpload(e) {
+    const filesArray = Array.from(e.target.files);
+    const validFiles = filesArray.filter(file => {
+      const ext = getExtension(file.name);
+      return ext && !['exe', 'dll', 'so', 'dylib', 'bin'].includes(ext);
+    });
+    processUploadedFiles(validFiles);
+  }
+
+  function handleDragOver(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(true);
+  }
+
+  function handleDragLeave(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+
+    const filesArray = Array.from(e.dataTransfer.files);
+    processUploadedFiles(filesArray);
   }
 
   // ── Search across files ──
@@ -536,7 +807,6 @@ function EditorPage() {
   function handleEditorMount(editor, fileId) {
     editorsRef.current[fileId] = editor;
 
-    // Cursor tracking
     editor.onDidChangeCursorPosition((e) => {
       socketRef.current?.emit("cursor-change", { roomId, username, position: e.position, fileId });
     });
@@ -614,7 +884,7 @@ function EditorPage() {
       const res = await fetch(`http://localhost:3001/api/room/${roomId}/versions?limit=30`);
       const data = await res.json();
       if (data.success) setVersions(data.versions);
-    } catch {}
+    } catch { }
     setVersionsLoading(false);
   }, [roomId]);
 
@@ -639,8 +909,25 @@ function EditorPage() {
         showToast(`Restored v${version.version}`);
         setPanelTab("chat");
       }
-    } catch {}
+    } catch { }
     setRestoringVersion(null);
+  }
+
+  const isOwner = roomOwner === username;
+
+  function kickUser(targetUsername) {
+    if (!isOwner || targetUsername === username) return;
+    socketRef.current?.emit("kick-user", { roomId, targetUsername, requesterUsername: username });
+  }
+
+  function transferOwner(targetUsername) {
+    if (!isOwner || targetUsername === username) return;
+    socketRef.current?.emit("transfer-owner", { roomId, targetUsername, requesterUsername: username });
+  }
+
+  function togglePrivacy() {
+    if (!isOwner) return;
+    socketRef.current?.emit("set-privacy", { roomId, isPrivate: !isPrivate, requesterUsername: username });
   }
 
   // ── Title rename ──
@@ -669,9 +956,12 @@ function EditorPage() {
   }
 
   useEffect(() => {
-    function close() { setCtxMenu(null); }
-    document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
+    function close(e) {
+      if (ctxMenuRef.current && ctxMenuRef.current.contains(e.target)) return;
+      setCtxMenu(null);
+    }
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
   }, []);
 
   // ── Console resize ──
@@ -718,10 +1008,39 @@ function EditorPage() {
       setIsJoining(false);
     });
 
-    socket.on("room-meta", ({ title, updatedAt }) => {
+    socket.on("room-meta", ({ title, updatedAt, owner, isPrivate: priv }) => {
       if (title) setRoomTitle(title);
       if (updatedAt) { setLastSavedAt(updatedAt); setSaveStatus("saved"); }
+      if (owner) setRoomOwner(owner);
+      if (priv !== undefined) setIsPrivate(priv);
       saveRecentRoom(roomId, title, activeLanguage);
+    });
+
+    socket.on("owner-change", ({ owner }) => {
+      setRoomOwner(owner);
+      if (owner === usernameToUse) showToast("👑 You are now the room owner");
+    });
+
+    socket.on("privacy-change", ({ isPrivate: priv }) => {
+      setIsPrivate(priv);
+    });
+
+    socket.on("you-were-kicked", () => {
+      if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+      navigate("/", { state: { kicked: true } });
+    });
+
+    socket.on("user-kicked", ({ username: kicked }) => {
+      showToast(`${kicked} was removed from the room`);
+    });
+
+    socket.on("room-private", () => {
+      setUsernameError("This room is private.");
+      setShowUsernameModal(true);
+      setIsConnected(false);
+      setIsJoining(false);
+      socket.disconnect();
+      socketRef.current = null;
     });
 
     socket.on("initial-code", (code) => {
@@ -733,7 +1052,6 @@ function EditorPage() {
       isRemoteChange.current = false;
     });
 
-    // Multi-file sync
     socket.on("file-sync", ({ files: remoteFiles }) => {
       if (remoteFiles?.length) {
         isRemoteChange.current = true;
@@ -912,7 +1230,34 @@ function EditorPage() {
   return (
     <>
       <style>{globalStyles}</style>
-      <div className="ide-root">
+      <div
+        className="ide-root"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {/* Drag and drop overlay */}
+        {dragActive && (
+          <div className="drag-overlay">
+            <div className="drag-overlay-content">
+              <div style={{ fontSize: '48px', marginBottom: '16px' }}>📁</div>
+              <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px' }}>
+                Drop files here
+              </div>
+              <div style={{ fontSize: '13px', color: 'var(--text3)' }}>
+                Supports JavaScript, Python, HTML, CSS, and more
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Upload progress indicator */}
+        {uploadingFiles && (
+          <div className="ide-file-upload-progress">
+            <div>Uploading files... ({uploadProgress.current}/{uploadProgress.total})</div>
+            <div className="progress-bar" style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }} />
+          </div>
+        )}
 
         {/* ── Toolbar ── */}
         <div className="ide-toolbar">
@@ -943,6 +1288,40 @@ function EditorPage() {
             {isExecuting ? "Running…" : "Run"}
           </button>
 
+          {/* File upload buttons */}
+          <div className="ide-upload-group">
+            <button
+              className="ide-toolbar-pill"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingFiles}
+              title="Upload files"
+            >
+              📁 Upload
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              onChange={handleFileUpload}
+              accept=".js,.jsx,.ts,.tsx,.py,.c,.cpp,.java,.go,.rs,.rb,.php,.kt,.sh,.html,.css,.json,.md,.yaml,.yml,.xml,.sql,.txt"
+            />
+            <button
+              className="ide-toolbar-pill"
+              onClick={() => {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.webkitdirectory = true;
+                input.multiple = true;
+                input.onchange = handleFolderUpload;
+                input.click();
+              }}
+              title="Upload folder"
+            >
+              📂 Folder
+            </button>
+          </div>
+
           <button
             className={`ide-toolbar-pill ${showConsole ? "active" : ""}`}
             onClick={() => setShowConsole(v => !v)}
@@ -956,7 +1335,18 @@ function EditorPage() {
             <span className={`ide-conn-dot ${isConnected ? "" : "offline"}`} />
             <span className="ide-room-id">{roomId}</span>
           </div>
-
+          {isOwner && (
+            <button
+              className={`ide-toolbar-pill ${isPrivate ? "active" : ""}`}
+              onClick={togglePrivacy}
+              title={isPrivate ? "Room is private — click to make public" : "Room is public — click to make private"}
+            >
+              {isPrivate ? "🔒 Private" : "🌐 Public"}
+            </button>
+          )}
+          {!isOwner && isPrivate && (
+            <span className="ide-toolbar-pill" style={{ cursor: "default" }}>🔒 Private</span>
+          )}
           <button
             className={`ide-toolbar-pill ${panelOpen ? "active" : ""}`}
             onClick={() => setPanelOpen(v => !v)}
@@ -1012,6 +1402,11 @@ function EditorPage() {
                     >+</button>
                     <button
                       className="ide-sidebar-action"
+                      title="New Folder"
+                      onClick={() => setCreatingFolder(true)}
+                    >📁</button>
+                    <button
+                      className="ide-sidebar-action"
                       title="Collapse"
                       onClick={() => setSidebarOpen(false)}
                       style={{ fontSize: 11 }}
@@ -1020,7 +1415,7 @@ function EditorPage() {
                 </div>
 
                 <div className="ide-file-tree">
-                  {/* Root folder */}
+                  {/* Root folder row */}
                   <div className="ide-folder">
                     <div className="ide-folder-row">
                       <span className="ide-folder-arrow open">▶</span>
@@ -1030,74 +1425,126 @@ function EditorPage() {
                       </span>
                     </div>
 
-                    {/* File list */}
-                    {files.map(file => {
-                      const lang = getLangFromFile(file.name);
-                      const color = getLangColor(lang);
-                      const icon = getIconLabel(file.name);
-                      const isActive = file.id === activeFileId;
+                    {/* Recursive tree renderer */}
+                    {(function renderTree(parentId, depth) {
+                      const children = files.filter(f => f.parentId === parentId);
+                      const folders = children.filter(f => f.type === "folder").sort((a, b) => a.name.localeCompare(b.name));
+                      const fileNodes = children.filter(f => f.type !== "folder").sort((a, b) => a.name.localeCompare(b.name));
+                      const indent = depth * 12;
 
-                      return (
-                        <div key={file.id}>
-                          {renamingFileId === file.id ? (
-                            <div className="ide-new-file-row">
-                              <input
-                                className="ide-rename-input"
-                                value={renameValue}
-                                onChange={e => setRenameValue(e.target.value)}
-                                onKeyDown={e => {
-                                  if (e.key === "Enter") {
-                                    renameFile(file.id, renameValue);
-                                    setRenamingFileId(null);
-                                  }
-                                  if (e.key === "Escape") setRenamingFileId(null);
-                                }}
-                                onBlur={() => {
-                                  if (renameValue.trim()) renameFile(file.id, renameValue);
-                                  setRenamingFileId(null);
-                                }}
-                                autoFocus
-                              />
+                      return [...folders, ...fileNodes].map(item => {
+                        if (item.type === "folder") {
+                          const isOpen = !collapsedFolders[item.id];
+                          return (
+                            <div key={item.id}>
+                              {renamingFileId === item.id ? (
+                                <div className="ide-new-file-row" style={{ paddingLeft: 28 + indent }}>
+                                  <input
+                                    className="ide-rename-input"
+                                    value={renameValue}
+                                    onChange={e => setRenameValue(e.target.value)}
+                                    onKeyDown={e => {
+                                      if (e.key === "Enter") { renameFile(item.id, renameValue); setRenamingFileId(null); }
+                                      if (e.key === "Escape") setRenamingFileId(null);
+                                    }}
+                                    onBlur={() => { if (renameValue.trim()) renameFile(item.id, renameValue); setRenamingFileId(null); }}
+                                    autoFocus
+                                  />
+                                </div>
+                              ) : (
+                                <div
+                                  className="ide-folder-row"
+                                  style={{ paddingLeft: 8 + indent }}
+                                  onClick={() => toggleFolder(item.id)}
+                                  onContextMenu={e => handleFileRightClick(e, item.id)}
+                                >
+                                  <span className={`ide-folder-arrow ${isOpen ? "open" : ""}`}>▶</span>
+                                  <span className="ide-folder-icon">{isOpen ? "📂" : "📁"}</span>
+                                  <span style={{ flex: 1, fontSize: 12.5, color: "var(--text1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    {item.name}
+                                  </span>
+                                  <div className="ide-file-actions">
+                                    <button className="ide-file-action-btn" title="New file in folder"
+                                      onClick={e => { e.stopPropagation(); setCreatingFileInFolder(item.id); setNewFileInFolderName(""); }}>+</button>
+                                    <button className="ide-file-action-btn" title="Rename"
+                                      onClick={e => { e.stopPropagation(); setRenameValue(item.name); setRenamingFileId(item.id); }}>✎</button>
+                                    <button className="ide-file-action-btn" title="Delete folder" style={{ color: "var(--red)" }}
+                                      onClick={e => { e.stopPropagation(); deleteFolder(item.id); }}>✕</button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* New file input inside this folder */}
+                              {creatingFileInFolder === item.id && (
+                                <div className="ide-new-file-row" style={{ paddingLeft: 28 + indent + 12 }}>
+                                  <span style={{ fontSize: 11, marginRight: 4 }}>📄</span>
+                                  <input
+                                    className="ide-new-file-input"
+                                    value={newFileInFolderName}
+                                    onChange={e => setNewFileInFolderName(e.target.value)}
+                                    onKeyDown={e => {
+                                      if (e.key === "Enter") { createNewFileInFolder(newFileInFolderName, item.id); setCreatingFileInFolder(null); setNewFileInFolderName(""); }
+                                      if (e.key === "Escape") { setCreatingFileInFolder(null); setNewFileInFolderName(""); }
+                                    }}
+                                    onBlur={() => { if (newFileInFolderName.trim()) createNewFileInFolder(newFileInFolderName, item.id); setCreatingFileInFolder(null); setNewFileInFolderName(""); }}
+                                    placeholder="filename.js"
+                                    autoFocus
+                                  />
+                                </div>
+                              )}
+
+                              {/* Recurse into children if open */}
+                              {isOpen && renderTree(item.id, depth + 1)}
                             </div>
-                          ) : (
-                            <div
-                              className={`ide-file-row ${isActive ? "active" : ""} ${file.unsaved ? "unsaved" : ""}`}
-                              onClick={() => openFile(file.id)}
-                              onContextMenu={e => handleFileRightClick(e, file.id)}
-                            >
-                              <div
-                                className="ide-file-badge"
-                                style={{ background: color + "22", color }}
-                              >
-                                {icon}
-                              </div>
-                              <span className="ide-file-name">{file.name}</span>
-                              <div className="ide-file-actions">
-                                <button
-                                  className="ide-file-action-btn"
-                                  title="Rename"
-                                  onClick={e => {
-                                    e.stopPropagation();
-                                    setRenameValue(file.name);
-                                    setRenamingFileId(file.id);
+                          );
+                        }
+
+                        // File node
+                        const lang = getLangFromFile(item.name);
+                        const color = getLangColor(lang);
+                        const icon = getIconLabel(item.name);
+                        const isActive = item.id === activeFileId;
+                        return (
+                          <div key={item.id}>
+                            {renamingFileId === item.id ? (
+                              <div className="ide-new-file-row" style={{ paddingLeft: 28 + indent }}>
+                                <input
+                                  className="ide-rename-input"
+                                  value={renameValue}
+                                  onChange={e => setRenameValue(e.target.value)}
+                                  onKeyDown={e => {
+                                    if (e.key === "Enter") { renameFile(item.id, renameValue); setRenamingFileId(null); }
+                                    if (e.key === "Escape") setRenamingFileId(null);
                                   }}
-                                >✎</button>
-                                {files.length > 1 && (
-                                  <button
-                                    className="ide-file-action-btn"
-                                    title="Delete"
-                                    onClick={e => { e.stopPropagation(); deleteFile(file.id); }}
-                                    style={{ color: "var(--red)" }}
-                                  >✕</button>
-                                )}
+                                  onBlur={() => { if (renameValue.trim()) renameFile(item.id, renameValue); setRenamingFileId(null); }}
+                                  autoFocus
+                                />
                               </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                            ) : (
+                              <div
+                                className={`ide-file-row ${isActive ? "active" : ""} ${item.unsaved ? "unsaved" : ""}`}
+                                style={{ paddingLeft: 28 + indent }}
+                                onClick={() => openFile(item.id)}
+                                onContextMenu={e => handleFileRightClick(e, item.id)}
+                              >
+                                <div className="ide-file-badge" style={{ background: color + "22", color }}>{icon}</div>
+                                <span className="ide-file-name">{item.name}</span>
+                                <div className="ide-file-actions">
+                                  <button className="ide-file-action-btn" title="Rename"
+                                    onClick={e => { e.stopPropagation(); setRenameValue(item.name); setRenamingFileId(item.id); }}>✎</button>
+                                  {files.filter(f => f.type === "file").length > 1 && (
+                                    <button className="ide-file-action-btn" title="Delete" style={{ color: "var(--red)" }}
+                                      onClick={e => { e.stopPropagation(); deleteFile(item.id); }}>✕</button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      });
+                    })(null, 0)}
 
-                    {/* New file input */}
+                    {/* New root-level file input */}
                     {creatingFile && (
                       <div className="ide-new-file-row">
                         <span style={{ fontSize: 11, marginRight: 4 }}>📄</span>
@@ -1106,22 +1553,30 @@ function EditorPage() {
                           value={newFileName}
                           onChange={e => setNewFileName(e.target.value)}
                           onKeyDown={e => {
-                            if (e.key === "Enter") {
-                              createNewFile(newFileName);
-                              setNewFileName("");
-                              setCreatingFile(false);
-                            }
-                            if (e.key === "Escape") {
-                              setNewFileName("");
-                              setCreatingFile(false);
-                            }
+                            if (e.key === "Enter") { createNewFile(newFileName); setNewFileName(""); setCreatingFile(false); }
+                            if (e.key === "Escape") { setNewFileName(""); setCreatingFile(false); }
                           }}
-                          onBlur={() => {
-                            if (newFileName.trim()) createNewFile(newFileName);
-                            setNewFileName("");
-                            setCreatingFile(false);
-                          }}
+                          onBlur={() => { if (newFileName.trim()) createNewFile(newFileName); setNewFileName(""); setCreatingFile(false); }}
                           placeholder="filename.js"
+                          autoFocus
+                        />
+                      </div>
+                    )}
+
+                    {/* New root-level folder input */}
+                    {creatingFolder && (
+                      <div className="ide-new-file-row">
+                        <span style={{ fontSize: 11, marginRight: 4 }}>📁</span>
+                        <input
+                          className="ide-new-file-input"
+                          value={newFolderName}
+                          onChange={e => setNewFolderName(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") { createNewFolder(newFolderName); setNewFolderName(""); setCreatingFolder(false); }
+                            if (e.key === "Escape") { setNewFolderName(""); setCreatingFolder(false); }
+                          }}
+                          onBlur={() => { if (newFolderName.trim()) createNewFolder(newFolderName); setNewFolderName(""); setCreatingFolder(false); }}
+                          placeholder="folder-name"
                           autoFocus
                         />
                       </div>
@@ -1180,15 +1635,46 @@ function EditorPage() {
                   <span className="ide-sidebar-title">Collaborators ({users.length})</span>
                 </div>
                 <div className="ide-sidebar-users" style={{ flex: 1, overflowY: "auto" }}>
-                  {users.map((user, idx) => (
-                    <div key={user.id || idx} className={`ide-user-chip ${user.username === username ? "self" : ""}`}>
-                      <div className={`ide-avatar ${user.username !== username ? "ide-avatar-other" : ""}`}>
-                        {getInitials(user.username)}
+                  {users.map((user, idx) => {
+                    const isThisUserOwner = user.username === roomOwner;
+                    const isYou = user.username === username;
+                    return (
+                      <div key={user.id || idx} className={`ide-user-chip ${isYou ? "self" : ""}`}
+                        style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div className={`ide-avatar ${!isYou ? "ide-avatar-other" : ""}`}
+                            style={isThisUserOwner ? { boxShadow: "0 0 0 2px #f59e0b" } : {}}>
+                            {getInitials(user.username)}
+                          </div>
+                          <span className="ide-uname">{user.username}</span>
+                          {isThisUserOwner && (
+                            <span style={{ marginLeft: "auto", fontSize: 9, padding: "1px 6px", background: "rgba(245,158,11,.15)", border: "1px solid rgba(245,158,11,.3)", borderRadius: 3, color: "#f59e0b", fontFamily: "'DM Mono', monospace" }}>
+                              👑 owner
+                            </span>
+                          )}
+                          {!isThisUserOwner && isYou && (
+                            <span className="ide-you-badge">you</span>
+                          )}
+                        </div>
+                        {isOwner && !isYou && (
+                          <div style={{ display: "flex", gap: 4, paddingLeft: 32 }}>
+                            <button
+                              onClick={() => kickUser(user.username)}
+                              style={{ flex: 1, padding: "3px 0", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 5, color: "rgba(239,68,68,.7)", fontSize: 10, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
+                            >
+                              Kick
+                            </button>
+                            <button
+                              onClick={() => transferOwner(user.username)}
+                              style={{ flex: 1, padding: "3px 0", background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.2)", borderRadius: 5, color: "rgba(245,158,11,.7)", fontSize: 10, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
+                            >
+                              Make Owner
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      <span className="ide-uname">{user.username}</span>
-                      {user.username === username && <span className="ide-you-badge">you</span>}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </>
             )}
@@ -1297,7 +1783,7 @@ function EditorPage() {
                 <div className="ide-welcome-logo">⌘</div>
                 <div className="ide-welcome-title">No file open</div>
                 <div className="ide-welcome-sub">
-                  Create a new file or select one from the explorer to start coding.
+                  Create a new file, upload files, or select one from the explorer to start coding.
                 </div>
                 <div className="ide-welcome-shortcuts">
                   <div className="ide-shortcut-row">
@@ -1305,8 +1791,12 @@ function EditorPage() {
                     <span>New file</span>
                   </div>
                   <div className="ide-shortcut-row">
-                    <span className="ide-kbd">F1</span>
-                    <span>Command palette</span>
+                    <span className="ide-kbd">📁 Upload</span>
+                    <span>Upload files/folders</span>
+                  </div>
+                  <div className="ide-shortcut-row">
+                    <span className="ide-kbd">Drag & Drop</span>
+                    <span>Drop files anywhere</span>
                   </div>
                 </div>
               </div>
@@ -1473,39 +1963,78 @@ function EditorPage() {
               <div className="ide-status-item">{activeFile.name}</div>
             </>
           )}
+          {uploadingFiles && (
+            <>
+              <span className="ide-status-sep">·</span>
+              <div className="ide-status-item" style={{ color: "var(--yellow)" }}>
+                <span className="dot" style={{ background: "var(--yellow)", animation: "pulse 1s infinite" }} />
+                Uploading...
+              </div>
+            </>
+          )}
           <div className="ide-status-spacer" />
           <div className="ide-status-item">{username}</div>
         </div>
 
         {/* ── Context Menu ── */}
-        {ctxMenu && (
-          <div
-            className="ide-ctx-menu"
-            ref={ctxMenuRef}
-            style={{ top: ctxMenu.y, left: ctxMenu.x }}
-          >
-            <div className="ide-ctx-item" onClick={() => {
-              const f = files.find(f => f.id === ctxMenu.fileId);
-              if (f) { setRenameValue(f.name); setRenamingFileId(f.id); }
-              setCtxMenu(null);
-            }}>
-              <span>✎</span> Rename
+        {ctxMenu && (() => {
+          const ctxItem = files.find(f => f.id === ctxMenu.fileId);
+          const isFolder = ctxItem?.type === "folder";
+          return (
+            <div
+              className="ide-ctx-menu"
+              ref={ctxMenuRef}
+              style={{ top: ctxMenu.y, left: ctxMenu.x }}
+            >
+              <div className="ide-ctx-item" onClick={() => {
+                if (ctxItem) { setRenameValue(ctxItem.name); setRenamingFileId(ctxItem.id); }
+                setCtxMenu(null);
+              }}>
+                <span>✎</span> Rename
+              </div>
+              {isFolder ? (
+                <>
+                  <div className="ide-ctx-item" onClick={() => {
+                    setCreatingFileInFolder(ctxMenu.fileId);
+                    setNewFileInFolderName("");
+                    setCtxMenu(null);
+                  }}>
+                    <span>+</span> New file inside
+                  </div>
+                  <div className="ide-ctx-sep" />
+                  <div className="ide-ctx-item danger" onClick={() => {
+                    deleteFolder(ctxMenu.fileId);
+                    setCtxMenu(null);
+                  }}>
+                    <span>🗑</span> Delete folder
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="ide-ctx-item" onClick={() => {
+                    openFile(ctxMenu.fileId);
+                    setCtxMenu(null);
+                  }}>
+                    <span>↗</span> Open
+                  </div>
+                  <div className="ide-ctx-item" onClick={() => {
+                    if (ctxItem) downloadFile(ctxItem);
+                    setCtxMenu(null);
+                  }}>
+                    <span>💾</span> Download
+                  </div>
+                  <div className="ide-ctx-sep" />
+                  <div className="ide-ctx-item danger" onClick={() => {
+                    deleteFile(ctxMenu.fileId);
+                    setCtxMenu(null);
+                  }}>
+                    <span>🗑</span> Delete
+                  </div>
+                </>
+              )}
             </div>
-            <div className="ide-ctx-item" onClick={() => {
-              openFile(ctxMenu.fileId);
-              setCtxMenu(null);
-            }}>
-              <span>↗</span> Open
-            </div>
-            <div className="ide-ctx-sep" />
-            <div className="ide-ctx-item danger" onClick={() => {
-              deleteFile(ctxMenu.fileId);
-              setCtxMenu(null);
-            }}>
-              <span>🗑</span> Delete
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {toast && <div className="ide-toast">{toast}</div>}
       </div>

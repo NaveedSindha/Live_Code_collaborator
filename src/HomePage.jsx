@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
@@ -265,6 +265,7 @@ function formatRelativeTime(ts) {
 
 function HomePage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [roomId, setRoomId] = useState("");
   const [username, setUsername] = useState("");
   const [error, setError] = useState("");
@@ -275,13 +276,14 @@ function HomePage() {
   const [createdUsername, setCreatedUsername] = useState("");
   const [copyLabel, setCopyLabel] = useState("Copy");
   const [recentRooms, setRecentRooms] = useState([]);
+  const wasKicked = location.state?.kicked || false;
 
   // Load recent rooms from localStorage
   useEffect(() => {
     try {
       const recents = JSON.parse(localStorage.getItem("ep_recent_rooms") || "[]");
       setRecentRooms(recents);
-    } catch {}
+    } catch { }
   }, []);
 
   function clearRecents() {
@@ -444,6 +446,9 @@ function HomePage() {
                     <label className="hp-label">Room ID</label>
                     <input className="hp-input hp-input-mono" type="text" value={roomId} onChange={(e) => { setRoomId(e.target.value.toUpperCase()); setError(""); }} placeholder="A1B2C3D4" maxLength={8} autoComplete="off" />
                   </div>
+                  {wasKicked && !error && (
+                    <div className="hp-error">⚠ You were removed from that room by the owner.</div>
+                  )}
                   {error && <div className="hp-error">⚠ {error}</div>}
                   <button className="hp-btn-primary" onClick={handleJoinRoom} disabled={isCheckingRoom}>
                     {isCheckingRoom ? "Verifying…" : "Join Session →"}

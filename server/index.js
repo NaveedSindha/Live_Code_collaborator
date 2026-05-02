@@ -15,18 +15,18 @@ app.use(express.json());
 // ─────────────────────────────────────────────
 const LANGUAGES = {
   javascript: { judge0Id: 63, monacoId: "javascript" },
-  python:     { judge0Id: 71, monacoId: "python" },
-  c:          { judge0Id: 50, monacoId: "c" },
-  cpp:        { judge0Id: 54, monacoId: "cpp" },
-  java:       { judge0Id: 62, monacoId: "java" },
-  go:         { judge0Id: 60, monacoId: "go" },
-  rust:       { judge0Id: 73, monacoId: "rust" },
-  php:        { judge0Id: 68, monacoId: "php" },
-  ruby:       { judge0Id: 72, monacoId: "ruby" },
-  kotlin:     { judge0Id: 78, monacoId: "kotlin" },
-  bash:       { judge0Id: 46, monacoId: "shell" },
-  html:       { clientRendered: true, monacoId: "html" },
-  css:        { clientRendered: true, monacoId: "css" },
+  python: { judge0Id: 71, monacoId: "python" },
+  c: { judge0Id: 50, monacoId: "c" },
+  cpp: { judge0Id: 54, monacoId: "cpp" },
+  java: { judge0Id: 62, monacoId: "java" },
+  go: { judge0Id: 60, monacoId: "go" },
+  rust: { judge0Id: 73, monacoId: "rust" },
+  php: { judge0Id: 68, monacoId: "php" },
+  ruby: { judge0Id: 72, monacoId: "ruby" },
+  kotlin: { judge0Id: 78, monacoId: "kotlin" },
+  bash: { judge0Id: 46, monacoId: "shell" },
+  html: { clientRendered: true, monacoId: "html" },
+  css: { clientRendered: true, monacoId: "css" },
 };
 
 const JUDGE0_URL = "https://ce.judge0.com";
@@ -43,6 +43,8 @@ db.serialize(() => {
       title TEXT DEFAULT 'Untitled',
       current_code TEXT,
       current_language TEXT DEFAULT 'javascript',
+      owner_username TEXT DEFAULT NULL,
+      is_private INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -75,6 +77,8 @@ db.serialize(() => {
       id TEXT PRIMARY KEY,
       room_id TEXT NOT NULL,
       name TEXT NOT NULL,
+      type TEXT DEFAULT 'file',
+      parent_id TEXT DEFAULT NULL,
       content TEXT DEFAULT '',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -83,8 +87,12 @@ db.serialize(() => {
   `);
 
   // Migrations (silent failures if columns already exist)
-  db.run(`ALTER TABLE rooms ADD COLUMN title TEXT DEFAULT 'Untitled'`, () => {});
-  db.run(`ALTER TABLE code_versions ADD COLUMN label TEXT`, () => {});
+  db.run(`ALTER TABLE rooms ADD COLUMN title TEXT DEFAULT 'Untitled'`, () => { });
+  db.run(`ALTER TABLE code_versions ADD COLUMN label TEXT`, () => { });
+  db.run(`ALTER TABLE room_files ADD COLUMN type TEXT DEFAULT 'file'`, () => { });
+  db.run(`ALTER TABLE room_files ADD COLUMN parent_id TEXT DEFAULT NULL`, () => { });
+  db.run(`ALTER TABLE rooms ADD COLUMN owner_username TEXT DEFAULT NULL`, () => { });
+  db.run(`ALTER TABLE rooms ADD COLUMN is_private INTEGER DEFAULT 0`, () => { });
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, timestamp)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_code_versions_room ON code_versions(room_id, version)`);
@@ -164,6 +172,28 @@ function updateRoomLanguage(roomId, language) {
   `, [roomId, language]);
 }
 
+function setRoomOwnerInDB(roomId, ownerUsername) {
+  db.run(`
+    INSERT INTO rooms (room_id, owner_username, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(room_id) DO UPDATE SET owner_username = excluded.owner_username, updated_at = CURRENT_TIMESTAMP
+  `, [roomId, ownerUsername]);
+}
+
+function setRoomPrivacyInDB(roomId, isPrivate) {
+  db.run(`
+    INSERT INTO rooms (room_id, is_private, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(room_id) DO UPDATE SET is_private = excluded.is_private, updated_at = CURRENT_TIMESTAMP
+  `, [roomId, isPrivate ? 1 : 0]);
+}
+
+function getRoomMeta(roomId) {
+  return new Promise((resolve, reject) => {
+    db.get(`SELECT owner_username, is_private FROM rooms WHERE room_id = ?`, [roomId], (err, row) => {
+      if (err) reject(err); else resolve(row || { owner_username: null, is_private: 0 });
+    });
+  });
+}
+
 function updateRoomTitle(roomId, title) {
   db.run(`
     INSERT INTO rooms (room_id, title, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -180,16 +210,18 @@ function getRoomFiles(roomId) {
   });
 }
 
-function upsertRoomFile(fileId, roomId, name, content) {
+function upsertRoomFile(fileId, roomId, name, content, type = 'file', parentId = null) {
   return new Promise((resolve, reject) => {
     db.run(`
-      INSERT INTO room_files (id, room_id, name, content, updated_at)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      INSERT INTO room_files (id, room_id, name, type, parent_id, content, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
+        type = excluded.type,
+        parent_id = excluded.parent_id,
         content = excluded.content,
         updated_at = CURRENT_TIMESTAMP
-    `, [fileId, roomId, name, content], function (err) {
+    `, [fileId, roomId, name, type, parentId, content], function (err) {
       if (err) reject(err); else resolve();
     });
   });
@@ -348,6 +380,8 @@ const server = http.createServer(app);
 const roomUsers = new Map();
 const roomFilesCache = new Map(); // roomId -> Map<fileId, {id, name, content}>
 const roomMessagesCache = new Map();
+const roomOwners = new Map();
+const roomJoinOrder = new Map();
 
 const io = new Server(server, {
   cors: { origin: "http://localhost:5173", methods: ["GET", "POST"], credentials: true },
@@ -372,6 +406,14 @@ io.on("connection", (socket) => {
       if (taken) { socket.emit("username-taken"); return; }
     }
 
+    // Privacy check — if room is private and already has users, reject non-owners
+    const roomMeta = await getRoomMeta(roomId);
+    const currentUsersInRoom = roomUsers.has(roomId) ? roomUsers.get(roomId).size : 0;
+    if (roomMeta.is_private && currentUsersInRoom > 0) {
+      const isOwner = roomMeta.owner_username === username;
+      if (!isOwner) { socket.emit("room-private"); return; }
+    }
+
     if (socket.roomId) { socket.leave(socket.roomId); removeUserFromRoom(socket.id, socket.roomId); }
 
     socket.join(roomId);
@@ -380,7 +422,27 @@ io.on("connection", (socket) => {
 
     if (!roomUsers.has(roomId)) roomUsers.set(roomId, new Map());
     roomUsers.get(roomId).set(socket.id, { id: socket.id, username, joinedAt: Date.now() });
+
+    // Track join order
+    if (!roomJoinOrder.has(roomId)) roomJoinOrder.set(roomId, []);
+    if (!roomJoinOrder.get(roomId).includes(username)) {
+      roomJoinOrder.get(roomId).push(username);
+    }
+
+    // Set owner if room has none yet
+    if (!roomOwners.has(roomId)) {
+      const dbOwner = roomMeta.owner_username;
+      if (dbOwner) {
+        roomOwners.set(roomId, dbOwner);
+      } else {
+        roomOwners.set(roomId, username);
+        setRoomOwnerInDB(roomId, username);
+      }
+    }
+
+    const owner = roomOwners.get(roomId);
     io.to(roomId).emit("room-users", Array.from(roomUsers.get(roomId).values()));
+    io.to(roomId).emit("owner-change", { owner });
     socket.to(roomId).emit("user-joined", { username });
 
     // Load room data
@@ -395,12 +457,14 @@ io.on("connection", (socket) => {
       title: roomData?.title || "Untitled",
       updatedAt: roomData?.updated_at || null,
       createdAt: roomData?.created_at || null,
+      owner,
+      isPrivate: !!roomMeta.is_private,
     });
 
     // Create room record if it doesn't exist
     db.run(
-      `INSERT OR IGNORE INTO rooms (room_id, current_language, created_at, updated_at) VALUES (?, 'javascript', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [roomId]
+      `INSERT OR IGNORE INTO rooms (room_id, current_language, owner_username, created_at, updated_at) VALUES (?, 'javascript', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [roomId, username]
     );
 
     // ── Multi-file sync ──
@@ -466,7 +530,7 @@ io.on("connection", (socket) => {
   socket.on("file-created", async ({ roomId, file, username }) => {
     const filesMap = getRoomFilesMap(roomId);
     filesMap.set(file.id, file);
-    await upsertRoomFile(file.id, roomId, file.name, file.content || "");
+    await upsertRoomFile(file.id, roomId, file.name, file.content || "", file.type || 'file', file.parentId || null);
     socket.to(roomId).emit("file-created", { file, username });
   });
 
@@ -479,12 +543,15 @@ io.on("connection", (socket) => {
   });
 
   // ── File renamed ──
-  socket.on("file-renamed", async ({ roomId, fileId, name, username }) => {
+  socket.on("file-renamed", async ({ roomId, fileId, name, parentId, username }) => {
     const filesMap = getRoomFilesMap(roomId);
     const existing = filesMap.get(fileId);
-    if (existing) filesMap.set(fileId, { ...existing, name });
-    db.run(`UPDATE room_files SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [name, fileId]);
-    socket.to(roomId).emit("file-renamed", { fileId, name, username });
+    if (existing) filesMap.set(fileId, { ...existing, name, parentId: parentId ?? existing.parentId });
+    db.run(
+      `UPDATE room_files SET name = ?, parent_id = COALESCE(?, parent_id), updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [name, parentId ?? null, fileId]
+    );
+    socket.to(roomId).emit("file-renamed", { fileId, name, parentId, username });
   });
 
   // ── Language change (backward compat) ──
@@ -513,6 +580,68 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("autosaved", { savedAt: new Date().toISOString(), username, label: label || "Manual save" });
   });
 
+  // ── Kick user ──
+  socket.on("kick-user", ({ roomId, targetUsername, requesterUsername }) => {
+    const owner = roomOwners.get(roomId);
+    if (owner !== requesterUsername) return; // only owner can kick
+    if (targetUsername === requesterUsername) return; // can't kick yourself
+
+    // Find the target's socket and disconnect them from the room
+    const usersInRoom = roomUsers.get(roomId);
+    if (!usersInRoom) return;
+    for (const [sid, user] of usersInRoom.entries()) {
+      if (user.username === targetUsername) {
+        const targetSocket = io.sockets.sockets.get(sid);
+        if (targetSocket) {
+          targetSocket.emit("you-were-kicked");
+          targetSocket.leave(roomId);
+          targetSocket.roomId = null;
+        }
+        usersInRoom.delete(sid);
+        break;
+      }
+    }
+    // Remove from join order
+    const joinOrder = roomJoinOrder.get(roomId) || [];
+    roomJoinOrder.set(roomId, joinOrder.filter(u => u !== targetUsername));
+
+    io.to(roomId).emit("room-users", Array.from(usersInRoom.values()));
+    io.to(roomId).emit("owner-change", { owner: roomOwners.get(roomId) });
+    io.to(roomId).emit("user-kicked", { username: targetUsername });
+  });
+
+  // ── Transfer ownership ──
+  socket.on("transfer-owner", ({ roomId, targetUsername, requesterUsername }) => {
+    const owner = roomOwners.get(roomId);
+    if (owner !== requesterUsername) return;
+    const usersInRoom = roomUsers.get(roomId);
+    if (!usersInRoom) return;
+    const targetExists = Array.from(usersInRoom.values()).some(u => u.username === targetUsername);
+    if (!targetExists) return;
+
+    roomOwners.set(roomId, targetUsername);
+    setRoomOwnerInDB(roomId, targetUsername);
+    io.to(roomId).emit("owner-change", { owner: targetUsername });
+    io.to(roomId).emit("chat-message", {
+      message: `👑 ${requesterUsername} transferred ownership to ${targetUsername}`,
+      username: "System",
+      timestamp: Date.now(),
+    });
+  });
+
+  // ── Set privacy ──
+  socket.on("set-privacy", ({ roomId, isPrivate, requesterUsername }) => {
+    const owner = roomOwners.get(roomId);
+    if (owner !== requesterUsername) return;
+    setRoomPrivacyInDB(roomId, isPrivate);
+    io.to(roomId).emit("privacy-change", { isPrivate });
+    io.to(roomId).emit("chat-message", {
+      message: `🔒 ${requesterUsername} made the room ${isPrivate ? "private" : "public"}`,
+      username: "System",
+      timestamp: Date.now(),
+    });
+  });
+
   // ── Room rename ──
   socket.on("rename-room", ({ roomId, title, username }) => {
     if (!title?.trim()) return;
@@ -533,6 +662,36 @@ io.on("connection", (socket) => {
     }
     if (socket.roomId && socket.username) {
       socket.to(socket.roomId).emit("user-left", { username: socket.username });
+
+      // If the disconnecting user was the owner, transfer to next in join order
+      if (roomOwners.get(socket.roomId) === socket.username) {
+        const joinOrder = roomJoinOrder.get(socket.roomId) || [];
+        const remaining = joinOrder.filter(u => {
+          if (u === socket.username) return false;
+          const usersInRoom = roomUsers.get(socket.roomId);
+          if (!usersInRoom) return false;
+          return Array.from(usersInRoom.values()).some(usr => usr.username === u);
+        });
+        if (remaining.length > 0) {
+          const newOwner = remaining[0];
+          roomOwners.set(socket.roomId, newOwner);
+          setRoomOwnerInDB(socket.roomId, newOwner);
+          io.to(socket.roomId).emit("owner-change", { owner: newOwner });
+          io.to(socket.roomId).emit("chat-message", {
+            message: `👑 ${socket.username} left — ${newOwner} is now the room owner`,
+            username: "System",
+            timestamp: Date.now(),
+          });
+        } else {
+          roomOwners.delete(socket.roomId);
+          roomJoinOrder.delete(socket.roomId);
+        }
+      }
+
+      // Remove from join order
+      const joinOrder = roomJoinOrder.get(socket.roomId) || [];
+      roomJoinOrder.set(socket.roomId, joinOrder.filter(u => u !== socket.username));
+
       removeUserFromRoom(socket.id, socket.roomId);
     }
   });
