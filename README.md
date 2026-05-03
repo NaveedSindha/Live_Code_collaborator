@@ -98,28 +98,36 @@ npm --version    # should be v9+
 ## ✦ Project Structure
 
 ```
-codesync/
-├── client/                  # React frontend
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── EditorPage.jsx    # Main IDE page
-│   │   │   └── HomePage.jsx      # Landing / room join page
-│   │   ├── components/
-│   │   │   ├── Toolbar.jsx       # Top toolbar
-│   │   │   ├── Sidebar.jsx       # File explorer + users + search
-│   │   │   ├── EditorPane.jsx    # Monaco editor + console
-│   │   │   ├── RightPanel.jsx    # Chat + version history
-│   │   │   └── StatusBar.jsx     # Bottom status bar
-│   │   ├── hooks/
-│   │   │   └── useFiles.js       # File system state & operations
-│   │   ├── styles/
-│   │   │   └── editorStyles.js   # Global CSS-in-JS styles
-│   │   └── App.jsx
-│   └── package.json
+live-code-collab/
+├── public/                     # Static assets
+├── src/                        # React frontend source
+│   ├── assets/                 # Images, icons, etc.
+│   ├── components/             # Reusable UI components
+│   │   ├── EditorPane.jsx      # Monaco editor + console
+│   │   ├── RightPanel.jsx      # Chat + version history
+│   │   ├── Sidebar.jsx         # File explorer + users + search
+│   │   ├── StatusBar.jsx       # Bottom status bar
+│   │   └── Toolbar.jsx         # Top toolbar
+│   ├── hooks/                  # Custom React hooks
+│   │   └── useFiles.js         # File system state & operations
+│   ├── pages/                  # Page-level components
+│   │   └── EditorPage.jsx      # Main IDE page
+│   ├── styles/                 # Styling files
+│   │   └── editorStyles.js     # Global CSS-in-JS styles
+│   ├── App.jsx                 # Root component
+│   ├── HomePage.jsx            # Landing / room join page
+│   └── main.jsx                # Entry point
 │
-└── server/                  # Node.js backend
-    ├── server.js            # Express + Socket.IO server
-    └── package.json
+├── server/                     # Node.js backend
+│   ├── index.js                # Express + Socket.IO server
+│   ├── collab_editor.db        # SQLite database (auto-generated)
+│   └── package.json            # Server dependencies
+│
+├── index.html                  # Vite HTML template
+├── package.json                # Frontend dependencies
+├── vite.config.js              # Vite configuration
+├── .gitignore
+└── README.md
 ```
 
 ---
@@ -153,7 +161,7 @@ express-rate-limit
 ### 3. Install client dependencies
 
 ```bash
-cd ../client
+# from the root folder
 npm install
 ```
 
@@ -191,7 +199,7 @@ Server running on http://localhost:3001
 ### Terminal 2 — Start the client
 
 ```bash
-cd client
+# from the root folder
 npm run dev
 ```
 
