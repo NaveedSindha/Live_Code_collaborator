@@ -137,7 +137,7 @@ live-code-collab/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/codesync.git
+git clone https://github.com/NaveedSindha/Live_Code_collaborator.git
 cd codesync
 ```
 
@@ -177,6 +177,18 @@ socket.io-client
 jszip
 ```
 
+### 4. Setup environment variables
+
+Copy the example file:
+
+```bash
+cp .env.example .env
+```
+Then edit .env if needed:
+
+VITE_API_URL=http://localhost:3001
+
+
 ---
 
 ## ✦ Running the App
@@ -187,7 +199,7 @@ You need two terminal windows — one for the server, one for the client.
 
 ```bash
 cd server
-node server.js
+node index.js
 ```
 
 You should see:
@@ -262,18 +274,25 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ## ✦ Environment Configuration
 
-By default the app connects to `http://localhost:3001`. To change this for production, update the following locations in the client:
+CodeSync uses environment variables to configure the backend URL.
 
-- `src/pages/EditorPage.jsx` — Socket.IO connection URL and all `fetch` calls
-- `src/pages/HomePage.jsx` — Room existence check fetch call
+### 1. Create a `.env` file in the root:
 
-For the server, update the Socket.IO CORS origin:
-```js
-// server.js
-const io = new Server(server, {
-  cors: { origin: "http://localhost:5173" } // change to your frontend URL
-});
-```
+VITE_API_URL=http://localhost:3001
+
+
+### 2. For production
+
+Replace the value with your deployed backend URL:
+
+VITE_API_URL=https://your-backend-url.com
+
+
+### 3. Notes
+
+- `.env` is ignored by Git and should not be committed
+- `.env.example` is provided as a template
+- If `.env` is missing, the app defaults to `http://localhost:3001`
 
 ---
 

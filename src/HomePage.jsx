@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
+import { API_URL } from "./config";
 
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
@@ -308,7 +309,7 @@ function HomePage() {
 
   const checkRoomExists = async (id) => {
     try {
-      const res = await fetch(`http://localhost:3001/api/room/${id}`);
+      const res = await fetch(`${API_URL}/api/room/${id}`)
       const data = await res.json();
       return data.success && data.data.exists;
     } catch { return false; }
@@ -352,7 +353,7 @@ function HomePage() {
     if (!exists) { setError("Room not found. Please verify the Room ID."); return; }
 
     try {
-      const res = await fetch(`http://localhost:3001/api/room/${roomId}`);
+      const res = await fetch(`${API_URL}/api/room/${roomId}`)
       const data = await res.json();
       const roomLanguage = data.data?.language || "javascript";
       navigate(`/room/${roomId}`, { state: { username, language: roomLanguage } });

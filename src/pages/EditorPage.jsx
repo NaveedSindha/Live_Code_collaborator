@@ -3,6 +3,7 @@ import JSZip from "jszip";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { io } from "socket.io-client";
 import * as monaco from "monaco-editor";
+import { API_URL } from "../config";
 
 import { globalStyles } from "../styles/editorStyles";
 import { useFiles, getLangFromFile } from "../hooks/useFiles";
@@ -144,7 +145,7 @@ function EditorPage() {
     setIsExecuting(true);
     setOutput("Running…");
     try {
-      const res = await fetch("http://localhost:3001/api/execute", {
+      const res = await fetch(`${API_URL}/api/execute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code, language: lang }),
@@ -170,7 +171,7 @@ function EditorPage() {
   const loadVersions = useCallback(async () => {
     setVersionsLoading(true);
     try {
-      const res = await fetch(`http://localhost:3001/api/room/${roomId}/versions?limit=30`);
+      const res = await fetch(`${API_URL}/api/room/${roomId}/versions?limit=30`);
       const data = await res.json();
       if (data.success) setVersions(data.versions);
     } catch { }
@@ -184,7 +185,7 @@ function EditorPage() {
   async function restoreVersion(version) {
     setRestoringVersion(version.version);
     try {
-      const res = await fetch(`http://localhost:3001/api/room/${roomId}/version/${version.version}`);
+      const res = await fetch(`${API_URL}/api/room/${roomId}/version/${version.version}`);
       const data = await res.json();
       if (data.success && activeFile) {
         const code = data.version.code;
@@ -325,7 +326,7 @@ function EditorPage() {
   };
 
   function initializeSocket(usernameToUse) {
-    const socket = io("http://localhost:3001", {
+    const socket = io(API_URL, {
       reconnection: true, reconnectionAttempts: 5, reconnectionDelay: 1000,
     });
     socketRef.current = socket;
