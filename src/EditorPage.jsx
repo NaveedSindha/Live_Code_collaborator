@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import JSZip from "jszip";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 import { io } from "socket.io-client";
@@ -930,6 +931,75 @@ function EditorPage() {
     socketRef.current?.emit("set-privacy", { roomId, isPrivate: !isPrivate, requesterUsername: username });
   }
 
+  async function downloadAllAsZip() {
+    const zip = new JSZip();
+
+    // Build folder structure in zip
+    function getFullPath(file) {
+      const parts = [];
+      let current = file;
+      while (current.parentId) {
+        const parent = files.find(f => f.id === current.parentId);
+        if (!parent) break;
+        parts.unshift(parent.name);
+        current = parent;
+      }
+      parts.push(file.name);
+      return parts.join("/");
+    }
+
+    // Only add actual files, not folder nodes
+    files
+      .filter(f => f.type !== "folder")
+      .forEach(f => zip.file(getFullPath(f), f.content || ""));
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${roomTitle || roomId}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast("📦 Downloaded as ZIP");
+  }
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (!ctrl) return;
+
+      switch (e.key) {
+        case "s":
+          e.preventDefault();
+          triggerManualSave();
+          break;
+        case "w":
+          e.preventDefault();
+          if (activeFileId) closeTab(activeFileId);
+          break;
+        case "`":
+          e.preventDefault();
+          setShowConsole(v => !v);
+          break;
+        case "b":
+          e.preventDefault();
+          setSidebarOpen(v => !v);
+          break;
+        case "Enter":
+          e.preventDefault();
+          executeCode();
+          break;
+        default:
+          break;
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeFileId, activeFile, socketRef, username, roomId, isExecuting]);
+
   // ── Title rename ──
   function handleTitleBlur(e) {
     const newTitle = e.target.value.trim() || "Untitled";
@@ -1321,6 +1391,14 @@ function EditorPage() {
               📂 Folder
             </button>
           </div>
+          <button
+            className="ide-toolbar-pill"
+            onClick={downloadAllAsZip}
+            title="Download all files as ZIP"
+            disabled={files.filter(f => f.type !== "folder").length === 0}
+          >
+            📦 Export ZIP
+          </button>
 
           <button
             className={`ide-toolbar-pill ${showConsole ? "active" : ""}`}
@@ -1331,9 +1409,13 @@ function EditorPage() {
 
           <div className="ide-spacer" />
 
-          <div className="ide-room-badge">
+          <div className="ide-room-badge" style={{ cursor: "pointer" }} onClick={() => {
+            navigator.clipboard.writeText(`${window.location.origin}/room/${roomId}`);
+            showToast("🔗 Invite link copied!");
+          }} title="Click to copy invite link">
             <span className={`ide-conn-dot ${isConnected ? "" : "offline"}`} />
             <span className="ide-room-id">{roomId}</span>
+            <span style={{ fontSize: 10, color: "var(--text3)", marginLeft: 2 }}>⎘</span>
           </div>
           {isOwner && (
             <button

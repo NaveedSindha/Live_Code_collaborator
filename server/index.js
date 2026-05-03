@@ -187,9 +187,10 @@ function setRoomPrivacyInDB(roomId, isPrivate) {
 }
 
 function getRoomMeta(roomId) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     db.get(`SELECT owner_username, is_private FROM rooms WHERE room_id = ?`, [roomId], (err, row) => {
-      if (err) reject(err); else resolve(row || { owner_username: null, is_private: 0 });
+      // Always resolve — a missing room is not an error, it just has no meta yet
+      resolve(row || { owner_username: null, is_private: 0 });
     });
   });
 }
@@ -382,6 +383,7 @@ const roomFilesCache = new Map(); // roomId -> Map<fileId, {id, name, content}>
 const roomMessagesCache = new Map();
 const roomOwners = new Map();
 const roomJoinOrder = new Map();
+const roomPendingJoins = new Map();
 
 const io = new Server(server, {
   cors: { origin: "http://localhost:5173", methods: ["GET", "POST"], credentials: true },
@@ -399,19 +401,48 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("cursor-change", { username, position, fileId });
   });
 
-  socket.on("join-room", async ({ roomId, username }) => {
+  socket.on("join-room", async ({ roomId, username, approved }) => {
     // Username uniqueness check
     if (roomUsers.has(roomId)) {
       const taken = Array.from(roomUsers.get(roomId).values()).some(u => u.username === username);
       if (taken) { socket.emit("username-taken"); return; }
     }
-
-    // Privacy check — if room is private and already has users, reject non-owners
+    // Privacy check — use DB as source of truth, not memory
     const roomMeta = await getRoomMeta(roomId);
-    const currentUsersInRoom = roomUsers.has(roomId) ? roomUsers.get(roomId).size : 0;
-    if (roomMeta.is_private && currentUsersInRoom > 0) {
-      const isOwner = roomMeta.owner_username === username;
-      if (!isOwner) { socket.emit("room-private"); return; }
+    if (roomMeta.is_private && !approved) {
+      const dbOwner = roomMeta.owner_username;
+      if (dbOwner && dbOwner !== username) {
+        // Don't block — put them in a pending queue and notify the owner
+        if (!roomPendingJoins.has(roomId)) roomPendingJoins.set(roomId, new Map());
+        roomPendingJoins.get(roomId).set(username, socket.id);
+        socket.emit("join-pending"); // tell the joiner to wait
+        // Notify the owner if they're online
+        const usersInRoom = roomUsers.get(roomId);
+        if (usersInRoom) {
+          let ownerFound = false;
+          for (const [sid, user] of usersInRoom.entries()) {
+            if (user.username === dbOwner) {
+              ownerFound = true;
+              const ownerSocket = io.sockets.sockets.get(sid);
+              if (ownerSocket) {
+                ownerSocket.emit("join-request", { username, socketId: socket.id });
+                console.log(`Join request from ${username} sent to owner ${dbOwner}`);
+              } else {
+                console.log(`Owner ${dbOwner} socket not found for sid ${sid}`);
+              }
+            }
+          }
+          if (!ownerFound) {
+            console.log(`Owner ${dbOwner} is not currently in the room — nobody to notify`);
+            // Owner is offline, fall back to blocking
+            socket.emit("room-private");
+          }
+        } else {
+          console.log(`No users in room ${roomId} — owner is offline`);
+          socket.emit("room-private");
+        }
+        return;
+      }
     }
 
     if (socket.roomId) { socket.leave(socket.roomId); removeUserFromRoom(socket.id, socket.roomId); }
@@ -430,11 +461,14 @@ io.on("connection", (socket) => {
     }
 
     // Set owner if room has none yet
+    // Set owner if room has none in memory yet (e.g. after server restart)
     if (!roomOwners.has(roomId)) {
       const dbOwner = roomMeta.owner_username;
       if (dbOwner) {
+        // Restore from DB — don't hand ownership to whoever joins first
         roomOwners.set(roomId, dbOwner);
       } else {
+        // Brand new room — first joiner is the owner
         roomOwners.set(roomId, username);
         setRoomOwnerInDB(roomId, username);
       }
@@ -443,7 +477,11 @@ io.on("connection", (socket) => {
     const owner = roomOwners.get(roomId);
     io.to(roomId).emit("room-users", Array.from(roomUsers.get(roomId).values()));
     io.to(roomId).emit("owner-change", { owner });
-    socket.to(roomId).emit("user-joined", { username });
+    // Notify others only if it's not the owner quietly restoring their session
+    const wasServerRestart = roomMeta.owner_username && roomUsers.get(roomId).size === 1;
+    if (!wasServerRestart) {
+      socket.to(roomId).emit("user-joined", { username });
+    }
 
     // Load room data
     const [roomData, savedMessages, savedLanguage] = await Promise.all([
@@ -578,6 +616,40 @@ io.on("connection", (socket) => {
     if (!code || !roomId) return;
     saveRoomCode(roomId, code, username, label || "Manual save", fileName || null);
     io.to(roomId).emit("autosaved", { savedAt: new Date().toISOString(), username, label: label || "Manual save" });
+  });
+
+  // ── Approve join request ──
+  socket.on("approve-join", ({ roomId, targetUsername, requesterUsername }) => {
+    const owner = roomOwners.get(roomId);
+    if (owner !== requesterUsername) return;
+
+    const pending = roomPendingJoins.get(roomId);
+    if (!pending || !pending.has(targetUsername)) return;
+
+    const targetSocketId = pending.get(targetUsername);
+    pending.delete(targetUsername);
+
+    const targetSocket = io.sockets.sockets.get(targetSocketId);
+    if (targetSocket) {
+      targetSocket.emit("join-approved");
+    }
+  });
+
+  // ── Deny join request ──
+  socket.on("deny-join", ({ roomId, targetUsername, requesterUsername }) => {
+    const owner = roomOwners.get(roomId);
+    if (owner !== requesterUsername) return;
+
+    const pending = roomPendingJoins.get(roomId);
+    if (!pending || !pending.has(targetUsername)) return;
+
+    const targetSocketId = pending.get(targetUsername);
+    pending.delete(targetUsername);
+
+    const targetSocket = io.sockets.sockets.get(targetSocketId);
+    if (targetSocket) {
+      targetSocket.emit("join-denied");
+    }
   });
 
   // ── Kick user ──
